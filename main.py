@@ -2,6 +2,7 @@ import re
 import html
 import pickle
 import os.path
+from tqdm import tqdm
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -118,7 +119,7 @@ if __name__ == '__main__':
 
     print('Reading comments...')
     files = drive.list_folder(FOLDER_ID)
-    for f in files:
+    for f in tqdm(files):
         doc_id = f['id']
         tagged = drive.get_tags(doc_id)
         tags += [(doc_id, t) for t in tagged]

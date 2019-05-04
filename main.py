@@ -90,7 +90,7 @@ class Drive:
             comments += resp['comments']
 
         # Don't include resolved comments
-        comments = [c for c in comments if not c['resolved']]
+        comments = [c for c in comments if not c.get('resolved', False)]
 
         # Extract tags
         tagged = []

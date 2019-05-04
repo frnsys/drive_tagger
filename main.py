@@ -1,8 +1,10 @@
 import re
 import html
+import click
 import pickle
 import os.path
 from tqdm import tqdm
+from collections import defaultdict
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -58,7 +60,18 @@ class Drive:
         # Limit to docs
         return [f for f in files if f['mimeType'] == 'application/vnd.google-apps.document']
 
-    def get_tags(self, document_id):
+    def get_folder_tags(self, folder_id):
+        """Get tagged text and tags for
+        all documents in a folder"""
+        tags = []
+        files = self.list_folder(folder_id)
+        for f in tqdm(files):
+            doc_id = f['id']
+            tagged = self.get_doc_tags(doc_id)
+            tags += [(doc_id, t) for t in tagged]
+        return tags
+
+    def get_doc_tags(self, document_id):
         """Get tagged text and tags for a document"""
         # file = self.service.files().get(fileId=document_id).execute()
         # rev = self.service.revisions().get(fileId=document_id, revisionId='head').execute()
@@ -90,9 +103,23 @@ class Drive:
         return tagged
 
     def update_spreadsheet(self, sheet_id, tagged):
-        # Reset spreadsheet
-        self.sheets.values().clear(spreadsheetId=sheet_id, range='A:Z').execute()
+        # Get sub-sheets
+        resp = self.sheets.get(spreadsheetId=sheet_id).execute()
+        sheets = [s['properties'] for s in resp['sheets']]
 
+        # Reset sheets
+        requests = [{
+            'updateCells': {
+                'range': {
+                    'sheetId': s['sheetId']
+                },
+                'fields': 'userEnteredValue'
+            }
+        } for s in sheets]
+        body = {'requests': requests}
+        self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+
+        # Update first sheet (all tags)
         headers = ['Document ID', 'Text', 'Tags']
         values = [[doc_id, text, ', '.join(tags)] for doc_id, (text, tags) in tagged]
         body = {
@@ -105,25 +132,68 @@ class Drive:
             range=range,
             valueInputOption='RAW').execute()
 
-if __name__ == '__main__':
-    import sys
-    try:
-        FOLDER_ID = sys.argv[1]
-        SHEET_ID = sys.argv[2]
-    except IndexError:
-        print('Please specify the folder and spreadsheet ID')
-        sys.exit(1)
+        # Create per-tag sheets
+        tag_groups = defaultdict(list)
+        for doc_id, (text, tags) in tagged:
+            for tag in tags:
+                tag_groups[tag].append((doc_id, text))
 
-    tags = []
+        sheet_requests = []
+        for tag, mentions in tag_groups.items():
+            # Check if sheet exists for this tag
+            for s in sheets:
+                if s['title'] == tag:
+                    sheet = s
+                    break
+            else:
+                # Create new sheet
+                requests = [{
+                    'addSheet': {
+                        'properties': {
+                            'title': tag,
+                        }
+                    }
+                }]
+                body = {'requests': requests}
+                resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+                sheet = resp['replies'][0]['addSheet']['properties']
+
+            # This is heinous
+            sheet_requests.append({
+                'updateCells': {
+                    'rows': [{
+                        'values': [{
+                            'userEnteredValue': {
+                                'stringValue': c
+                            }
+                        } for c in m]
+                    } for m in mentions],
+                    'range': {
+                        'sheetId': sheet['sheetId']
+                    },
+                    'fields': 'userEnteredValue'
+                }
+            })
+        body = {'requests': sheet_requests}
+        self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+
+@click.group()
+def main():
+    pass
+
+@main.command()
+@click.argument('folder_id')
+@click.argument('sheet_id')
+def sync(folder_id, sheet_id):
     drive = Drive()
 
     print('Reading comments...')
-    files = drive.list_folder(FOLDER_ID)
-    for f in tqdm(files):
-        doc_id = f['id']
-        tagged = drive.get_tags(doc_id)
-        tags += [(doc_id, t) for t in tagged]
+    tags = drive.get_folder_tags(folder_id)
 
     print('Updating spreadsheet...')
-    drive.update_spreadsheet(SHEET_ID, tags)
+    drive.update_spreadsheet(sheet_id, tags)
     print('Done')
+
+
+if __name__ == '__main__':
+    main()

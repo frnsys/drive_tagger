@@ -94,12 +94,15 @@ class Drive:
 
         # Extract tags
         tagged = []
-        for c in comments:
-            tags = [t.strip('#') for t in TAG_RE.findall(c['content'])]
+        for comment in comments:
+            highlighted = comment['quotedFileContent']['value']
+            highlighted = html.unescape(highlighted)
+            tags = []
+            # Get tags from main comment and replies
+            for c in [comment] + comment['replies']:
+                tags += [t.strip('#') for t in TAG_RE.findall(c['content'])]
             if not tags: continue
-            text = c['quotedFileContent']['value']
-            text = html.unescape(text)
-            tagged.append((text, tags))
+            tagged.append((highlighted, tags))
         return tagged
 
     def update_spreadsheet(self, sheet_id, tagged):

@@ -110,6 +110,19 @@ class Drive:
         resp = self.sheets.get(spreadsheetId=sheet_id).execute()
         sheets = [s['properties'] for s in resp['sheets']]
 
+        # Delete sheets for missing tags
+        unique_tags = [tags for _, (_, tags) in tagged]
+        unique_tags = set([t for ts in unique_tags for t in ts])
+        to_delete = [s for s in sheets if s['index'] not in [0, 1] and s['title'] not in unique_tags]
+        if to_delete:
+            requests = [{
+                'deleteSheet': {
+                    'sheetId': s['sheetId']
+                }
+            } for s in to_delete]
+            body = {'requests': requests}
+            resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+
         # Reset sheets
         requests = [{
             'updateCells': {
@@ -122,9 +135,16 @@ class Drive:
         body = {'requests': requests}
         self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
 
-        # Update first sheet (all tags)
-        headers = ['Document ID', 'Text', 'Tags']
-        values = [[doc_id, text, ', '.join(tags)] for doc_id, (text, tags) in tagged]
+        # Count documents tags appear in
+        tag_counts = defaultdict(set)
+        for doc_id, (text, tags) in tagged:
+            for tag in tags:
+                tag_counts[tag].add(doc_id)
+        tag_counts = {tag: len(docs) for tag, docs in tag_counts.items()}
+
+        # Update first sheet (tag list)
+        headers = ['Tag', '# Documents']
+        values = [[tag, n_docs] for tag, n_docs in tag_counts.items()]
         body = {
             'values': [headers] + values
         }
@@ -134,6 +154,37 @@ class Drive:
             body=body,
             range=range,
             valueInputOption='RAW').execute()
+
+        # Update second sheet (all tags)
+        headers = ['Document ID', 'Text', 'Tags']
+        values = [[doc_id, text, ', '.join(tags)] for doc_id, (text, tags) in tagged]
+        all_tags_sheet = next(s for s in sheets if s['index'] == 1)
+        requests = [{
+            'updateCells': {
+                'rows': [{
+                    'values': [{
+                        'userEnteredValue': {
+                            'stringValue': c
+                        }
+                    } for c in m]
+                } for m in values],
+                'range': {
+                    'sheetId': all_tags_sheet['sheetId']
+                },
+                'fields': 'userEnteredValue'
+            }
+        }, {
+            'updateSheetProperties': {
+                'properties': {
+                    'sheetId': all_tags_sheet['sheetId'],
+                    'title': 'All Tags'
+                },
+                'fields': 'title'
+            }
+
+        }]
+        body = {'requests': requests}
+        resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
 
         # Create per-tag sheets
         tag_groups = defaultdict(list)

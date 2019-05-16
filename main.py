@@ -105,6 +105,18 @@ class Drive:
             tagged.append((highlighted, tags))
         return tagged
 
+    def create_sheet(self, sheet_id, title):
+        requests = [{
+            'addSheet': {
+                'properties': {
+                    'title': title
+                }
+            }
+        }]
+        body = {'requests': requests}
+        resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+        return resp['replies'][0]['addSheet']['properties']
+
     def update_spreadsheet(self, sheet_id, tagged):
         # Get sub-sheets
         resp = self.sheets.get(spreadsheetId=sheet_id).execute()
@@ -158,7 +170,12 @@ class Drive:
         # Update second sheet (all tags)
         headers = ['Document ID', 'Text', 'Tags']
         values = [[doc_id, text, ', '.join(tags)] for doc_id, (text, tags) in tagged]
-        all_tags_sheet = next(s for s in sheets if s['index'] == 1)
+        try:
+            all_tags_sheet = next(s for s in sheets if s['index'] == 1)
+        except StopIteration:
+            # Create if necessary
+            all_tags_sheet = self.create_sheet(sheet_id, 'All Tags')
+
         requests = [{
             'updateCells': {
                 'rows': [{
@@ -193,7 +210,7 @@ class Drive:
                 tag_groups[tag].append((doc_id, text))
 
         sheet_requests = []
-        for tag, mentions in tag_groups.items():
+        for tag, mentions in tqdm(tag_groups.items()):
             # Check if sheet exists for this tag
             for s in sheets:
                 if s['title'] == tag:
@@ -201,16 +218,7 @@ class Drive:
                     break
             else:
                 # Create new sheet
-                requests = [{
-                    'addSheet': {
-                        'properties': {
-                            'title': tag,
-                        }
-                    }
-                }]
-                body = {'requests': requests}
-                resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
-                sheet = resp['replies'][0]['addSheet']['properties']
+                sheet = self.create_sheet(sheet_id, tag)
 
             # This is heinous
             sheet_requests.append({

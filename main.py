@@ -100,7 +100,8 @@ class Drive:
             tags = []
             # Get tags from main comment and replies
             for c in [comment] + comment['replies']:
-                tags += [t.strip('#') for t in TAG_RE.findall(c['content'])]
+                # Standardize tags to lowercase
+                tags += [t.strip('#').lower() for t in TAG_RE.findall(c['content'])]
             if not tags: continue
             tagged.append((highlighted, tags))
         return tagged

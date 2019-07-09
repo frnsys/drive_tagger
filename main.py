@@ -10,13 +10,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
 TAG_RE = re.compile('#[A-Za-z0-9-_]+')
+LINK_RE = re.compile('https?:\/\/docs\.google\.com\/[\/\.a-z]*document\/d\/([A-Za-z0-9]+)(\/edit\?disco=([A-Za-z0-9]+))?')
 
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-Comment = namedtuple('Comment', ['highlighted', 'text', 'tags', 'user', 'url'])
+Comment = namedtuple('Comment', ['id', 'highlighted', 'text', 'tags', 'user', 'url', 'refs'])
 
 
 class Drive:
@@ -66,8 +67,11 @@ class Drive:
         """Get tagged text and tags for
         all documents in a folder"""
         tags = []
-        files = self.list_folder(folder_id)
         doc_meta = {}
+        doc_graph = defaultdict(list)
+        com_graph = defaultdict(list)
+
+        files = self.list_folder(folder_id)
         for f in tqdm(files):
             doc_id = f['id']
             file = self.service.files().get(fileId=doc_id).execute()
@@ -75,8 +79,15 @@ class Drive:
                 'title': file['name']
             }
             tagged = self.get_doc_tags(doc_id)
+            for com in tagged:
+                for ref in com.refs:
+                    if '#' in ref:
+                        com_graph[com.id].append(ref)
+                    else:
+                        doc_graph[com.id].append(ref)
+
             tags += [(doc_id, com) for com in tagged]
-        return tags, doc_meta
+        return tags, (doc_graph, com_graph), doc_meta
 
     def get_doc_tags(self, document_id):
         """Get tagged text and tags for a document"""
@@ -100,21 +111,29 @@ class Drive:
         # Don't include resolved comments
         comments = [c for c in comments if not c.get('resolved', False)]
 
+        # For building reference graph
+        links = defaultdict(lambda: {'docs': [], 'coms': []})
+
         # Extract tags
         tagged = []
         for comment in comments:
-            user = comment['author']['displayName']
-            text = comment['content']
             highlighted = comment['quotedFileContent']['value']
             highlighted = html.unescape(highlighted)
-            comment_url = '{}?disco={}'.format(doc_url, comment['id'])
-            tags = []
+
             # Get tags from main comment and replies
-            for c in [comment] + comment['replies']:
+            for com in [comment] + comment['replies']:
                 # Standardize tags to lowercase
-                tags += [t.strip('#').lower() for t in TAG_RE.findall(c['content'])]
-            if not tags: continue
-            tagged.append(Comment(highlighted, text, tags, user, comment_url))
+                tags = [t.strip('#').lower() for t in TAG_RE.findall(com['content'])]
+                if not tags: continue
+
+                text = com['content']
+                user = com['author']['displayName']
+                comment_url = '{}?disco={}'.format(doc_url, com['id'])
+                refs = ['{}#{}'.format(doc_id, com_id) if com_id else doc_id
+                        for doc_id, _, com_id in LINK_RE.findall(com['content'])]
+
+                id = '{}#{}'.format(document_id, com['id'])
+                tagged.append(Comment(id, highlighted, text, tags, user, comment_url, refs))
         return tagged
 
     def create_sheet(self, sheet_id, title):
@@ -129,7 +148,41 @@ class Drive:
         resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
         return resp['replies'][0]['addSheet']['properties']
 
-    def update_spreadsheet(self, sheet_id, tagged, doc_meta):
+    def update_sheet(self, sheet_id, sheets, index, title, headers, values):
+        try:
+            sheet = next(s for s in sheets if s['index'] == index)
+        except StopIteration:
+            # Create if necessary
+            sheet = self.create_sheet(sheet_id, title)
+
+        requests = [{
+            'updateCells': {
+                'rows': [{
+                    'values': [{
+                        'userEnteredValue': {
+                            'stringValue': c
+                        }
+                    } for c in m]
+                } for m in [headers] + values],
+                'range': {
+                    'sheetId': sheet['sheetId']
+                },
+                'fields': 'userEnteredValue'
+            }
+        }, {
+            'updateSheetProperties': {
+                'properties': {
+                    'sheetId': sheet['sheetId'],
+                    'title': title
+                },
+                'fields': 'title'
+            }
+
+        }]
+        body = {'requests': requests}
+        resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+
+    def update_spreadsheet(self, sheet_id, tagged, graphs, doc_meta):
         # Get sub-sheets
         resp = self.sheets.get(spreadsheetId=sheet_id).execute()
         sheets = [s['properties'] for s in resp['sheets']]
@@ -137,7 +190,7 @@ class Drive:
         # Delete sheets for missing tags
         unique_tags = [com.tags for _, com in tagged]
         unique_tags = set([t for ts in unique_tags for t in ts])
-        to_delete = [s for s in sheets if s['index'] not in [0, 1] and s['title'] not in unique_tags]
+        to_delete = [s for s in sheets if s['index'] not in [0, 1, 2, 3] and s['title'] not in unique_tags]
         if to_delete:
             requests = [{
                 'deleteSheet': {
@@ -183,38 +236,17 @@ class Drive:
         headers = ['Document ID', 'Title', 'Highlighted', 'Tags', 'Comment', 'User', 'Url']
         values = [[doc_id, doc_meta[doc_id]['title'], com.highlighted, ', '.join(com.tags), com.text, com.user, com.url]
                   for doc_id, com in tagged]
-        try:
-            all_tags_sheet = next(s for s in sheets if s['index'] == 1)
-        except StopIteration:
-            # Create if necessary
-            all_tags_sheet = self.create_sheet(sheet_id, 'All Tags')
+        self.update_sheet(sheet_id, sheets, 1, 'All Tags', headers, values)
 
-        requests = [{
-            'updateCells': {
-                'rows': [{
-                    'values': [{
-                        'userEnteredValue': {
-                            'stringValue': c
-                        }
-                    } for c in m]
-                } for m in [headers] + values],
-                'range': {
-                    'sheetId': all_tags_sheet['sheetId']
-                },
-                'fields': 'userEnteredValue'
-            }
-        }, {
-            'updateSheetProperties': {
-                'properties': {
-                    'sheetId': all_tags_sheet['sheetId'],
-                    'title': 'All Tags'
-                },
-                'fields': 'title'
-            }
-
-        }]
-        body = {'requests': requests}
-        resp = self.sheets.batchUpdate(spreadsheetId=sheet_id, body=body).execute()
+        # Update graph sheets
+        doc_graph, com_graph = graphs
+        for i, (g, n) in enumerate([(doc_graph, 'Document'), (com_graph, 'Comment')]):
+            values = []
+            title = 'Comment->{} Graph'.format(n)
+            headers = ['From Comment ID', 'To {} ID'.format(n)]
+            for com_id, ref_ids in g.items():
+                values += [[com_id, ref_id] for ref_id in ref_ids]
+            self.update_sheet(sheet_id, sheets, 2+i, title, headers, values)
 
         # Create per-tag sheets
         tag_groups = defaultdict(list)
@@ -263,10 +295,10 @@ def sync(folder_id, sheet_id):
     drive = Drive()
 
     print('Reading comments...')
-    tags, doc_meta = drive.get_folder_tags(folder_id)
+    tags, graphs, doc_meta = drive.get_folder_tags(folder_id)
 
     print('Updating spreadsheet...')
-    drive.update_spreadsheet(sheet_id, tags, doc_meta)
+    drive.update_spreadsheet(sheet_id, tags, graphs, doc_meta)
     print('Done')
 
 
